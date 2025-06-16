@@ -1,6 +1,6 @@
 {
   "name": "@chessle/chess.js-extended",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A powerful browser-only chess engine package that bundles Stockfish for position evaluation and analysis on top of chess.js",
   "main": "dist/index.js",
   "module": "dist/esm/index.js",
