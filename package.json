@@ -1,6 +1,6 @@
 {
   "name": "@chessle/chess.js-extended",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "A powerful browser-only chess engine package that bundles Stockfish for position evaluation and analysis on top of chess.js",
   "main": "dist/index.js",
   "module": "dist/esm/index.js",
@@ -13,10 +13,14 @@
   ],
   "scripts": {
     "prebuild": "node scripts/bundle-stockfish.mjs",
-    "build": "pnpm run lint && pnpm run clean && node build.mjs",
+    "build": "pnpm run lint && pnpm run test:run && pnpm run clean && node build.mjs",
     "dev": "node build.mjs --watch",
     "clean": "rm -rf dist",
-    "lint": "eslint . --ext .ts"
+    "lint": "eslint . --ext .ts",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [
     "chess",
@@ -42,7 +46,9 @@
     "@yarnpkg/esbuild-plugin-pnp": "3.0.0-rc.15",
     "esbuild": "^0.25.6",
     "eslint": "^8.57.1",
+    "jsdom": "^26.1.0",
     "tsx": "^4.19.3",
-    "typescript": "5.7.3"
+    "typescript": "5.7.3",
+    "vitest": "^3.2.4"
   }
 }
