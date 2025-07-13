@@ -3585,6 +3585,9 @@ var index_exports = {};
 __export(index_exports, {
   ChessEngine: () => ChessEngine
 });
+__reExport(index_exports, __toESM(require_chess()));
+
+// src/engine.ts
 var import_chess = __toESM(require_chess());
 
 // stockfish-bundle.ts
@@ -3599,8 +3602,7 @@ function getStockfishWasmJs() {
   return wasmData + wasmJs;
 }
 
-// index.ts
-__reExport(index_exports, __toESM(require_chess()));
+// src/event-emitter.ts
 var EventEmitter = class {
   constructor() {
     this.listeners = {};
@@ -3624,6 +3626,8 @@ var EventEmitter = class {
     this.listeners[event].forEach((listener) => listener(data));
   }
 };
+
+// src/engine.ts
 var ChessEngine = class extends import_chess.Chess {
   constructor() {
     super();
