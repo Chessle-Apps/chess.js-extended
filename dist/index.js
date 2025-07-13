@@ -3601,142 +3601,222 @@ function getStockfishWasmJs() {
 
 // index.ts
 __reExport(index_exports, __toESM(require_chess()));
+var EventEmitter = class {
+  constructor() {
+    this.listeners = {};
+  }
+  on(event, listener) {
+    if (!this.listeners[event]) {
+      this.listeners[event] = [];
+    }
+    this.listeners[event].push(listener);
+  }
+  off(event, listener) {
+    if (!this.listeners[event]) {
+      return;
+    }
+    this.listeners[event] = this.listeners[event].filter((l) => l !== listener);
+  }
+  emit(event, data) {
+    if (!this.listeners[event]) {
+      return;
+    }
+    this.listeners[event].forEach((listener) => listener(data));
+  }
+};
 var ChessEngine = class extends import_chess.Chess {
   constructor() {
     super();
+    this.stockfish = null;
+    this.emitter = new EventEmitter();
+    this.analysisLines = [];
+    this.stockfishWorkerUrl = null;
+    this.isuciok = false;
+    this.mode = "idle";
     this.lines = [];
   }
-  async evaluatePosition(options = {}) {
+  on(event, listener) {
+    this.emitter.on(event, listener);
+  }
+  off(event, listener) {
+    this.emitter.off(event, listener);
+  }
+  _initializeWorker(options = {}) {
+    if (this.stockfish) {
+      return this.stockfish;
+    }
     if (typeof window === "undefined" || typeof Worker === "undefined") {
       throw new Error(
         "ChessEngine requires a browser environment with Web Worker support"
       );
     }
-    return new Promise((resolve, reject) => {
-      let stockfishWorkerUrl;
-      if (options.stockfishUrl) {
-        stockfishWorkerUrl = options.stockfishUrl;
-      } else {
-        const wasmSupported = typeof WebAssembly === "object" && WebAssembly.validate(
-          Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0)
-        );
-        const stockfishCode = wasmSupported ? getStockfishWasmJs() : getStockfishJs();
-        const blob = new Blob([stockfishCode], {
-          type: "application/javascript"
-        });
-        stockfishWorkerUrl = URL.createObjectURL(blob);
+    if (options.stockfishUrl) {
+      this.stockfishWorkerUrl = options.stockfishUrl;
+    } else if (!this.stockfishWorkerUrl) {
+      const wasmSupported = typeof WebAssembly === "object" && WebAssembly.validate(
+        Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0)
+      );
+      const stockfishCode = wasmSupported ? getStockfishWasmJs() : getStockfishJs();
+      const blob = new Blob([stockfishCode], {
+        type: "application/javascript"
+      });
+      this.stockfishWorkerUrl = URL.createObjectURL(blob);
+    }
+    this.stockfish = new Worker(this.stockfishWorkerUrl);
+    this.isuciok = false;
+    this.stockfish.onerror = (error) => {
+      console.error("Stockfish worker error:", error);
+      this.terminate();
+    };
+    this.stockfish.addEventListener("message", (e) => {
+      this._handleStockfishMessage(e.data, options);
+    });
+    this._sendCommand("uci");
+    return this.stockfish;
+  }
+  _handleStockfishMessage(message, options) {
+    if (message === "uciok") {
+      this.isuciok = true;
+      this._setOptions(options);
+      return;
+    }
+    if (message.startsWith("bestmove")) {
+      if (this.mode === "stream") {
+        this.terminate();
       }
-      const stockfish = new Worker(stockfishWorkerUrl);
-      let timeoutId;
-      const cleanup = () => {
-        stockfish.terminate();
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+      return;
+    }
+    const sideToMove = this.fen().split(" ")[1];
+    const multipvMatch = message.match(
+      /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/
+    );
+    if (multipvMatch) {
+      const pvIndex = parseInt(multipvMatch[1], 10) - 1;
+      const evalType = multipvMatch[2];
+      const evalValue = parseInt(multipvMatch[3], 10);
+      const pvLine = multipvMatch[4].trim().split(/\s+/);
+      if (pvLine.length > 0) {
+        const sanLine = this.convertMovesToSAN(pvLine, this.fen());
+        let adjustedEval;
+        if (evalType === "cp") {
+          adjustedEval = sideToMove === "b" ? -evalValue / 100 : evalValue / 100;
+        } else {
+          const mateInMoves = Math.abs(evalValue);
+          adjustedEval = evalValue > 0 && sideToMove === "w" || evalValue < 0 && sideToMove === "b" ? `M${mateInMoves}` : `M-${mateInMoves}`;
         }
-        if (!options.stockfishUrl && stockfishWorkerUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(stockfishWorkerUrl);
-        }
-      };
-      stockfish.onerror = (error) => {
-        console.error("Stockfish worker error:", error);
-        cleanup();
-        reject(
-          new Error(
-            `Stockfish worker failed to load. ${error.message || "Check browser console for details."}`
-          )
+        this.analysisLines[pvIndex] = {
+          evaluation: adjustedEval,
+          line: sanLine
+        };
+        this.emitter.emit("analysis", this.analysisLines.filter(Boolean));
+      }
+    }
+  }
+  _sendCommand(command) {
+    if (this.stockfish) {
+      this.stockfish.postMessage(command);
+    }
+  }
+  _setOptions(options) {
+    if (options.multiPV)
+      this._sendCommand(`setoption name MultiPV value ${options.multiPV}`);
+    if (options.skillLevel)
+      this._sendCommand(
+        `setoption name Skill Level value ${options.skillLevel}`
+      );
+    if (options.contempt)
+      this._sendCommand(`setoption name Contempt value ${options.contempt}`);
+    if (options.threads)
+      this._sendCommand(`setoption name Threads value ${options.threads}`);
+    if (options.hash)
+      this._sendCommand(`setoption name Hash value ${options.hash}`);
+  }
+  startAnalysis(options = {}) {
+    if (this.mode !== "idle") {
+      console.warn("Engine is busy. Please stop the current analysis first.");
+      return;
+    }
+    this.mode = "stream";
+    this._initializeWorker(options);
+    this.analysisLines = [];
+    const checkUciOk = () => {
+      if (this.isuciok) {
+        this._sendCommand(`position fen ${this.fen()}`);
+        this._sendCommand("go infinite");
+      } else {
+        setTimeout(checkUciOk, 50);
+      }
+    };
+    checkUciOk();
+  }
+  stopAnalysis() {
+    if (this.mode === "stream") {
+      this._sendCommand("stop");
+    }
+  }
+  terminate() {
+    if (this.stockfish) {
+      this._sendCommand("quit");
+      this.stockfish.terminate();
+      this.stockfish = null;
+    }
+    if (this.stockfishWorkerUrl && this.stockfishWorkerUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(this.stockfishWorkerUrl);
+      this.stockfishWorkerUrl = null;
+    }
+    this.isuciok = false;
+    this.mode = "idle";
+  }
+  async evaluatePosition(options = {}) {
+    return new Promise((resolve, reject) => {
+      var _a;
+      if (this.mode !== "idle") {
+        return reject(
+          new Error("Engine is busy. Please stop the current analysis first.")
         );
-      };
+      }
+      this.mode = "evaluate";
+      this._initializeWorker(options);
+      this.analysisLines = [];
       const timeoutMs = options.movetime || 3e4;
-      timeoutId = setTimeout(() => {
+      const timeoutId = setTimeout(() => {
+        this.terminate();
         console.warn(
           `Stockfish evaluation timed out after ${timeoutMs}ms, returning empty analysis.`
         );
-        cleanup();
-        this.lines = [];
         resolve([]);
       }, timeoutMs);
-      const sideToMove = this.fen().split(" ")[1];
-      const analysisLines = [];
-      stockfish.addEventListener("message", (e) => {
-        const message = e.data;
-        const multipvMatch = message.match(
-          /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/
-        );
-        if (multipvMatch) {
-          const pvIndex = parseInt(multipvMatch[1], 10) - 1;
-          const evalType = multipvMatch[2];
-          const evalValue = parseInt(multipvMatch[3], 10);
-          const pvLine = multipvMatch[4].trim().split(/\s+/);
-          if (pvLine.length > 0) {
-            const sanLine = this.convertMovesToSAN(pvLine, this.fen());
-            let adjustedEval;
-            if (evalType === "cp") {
-              adjustedEval = sideToMove === "b" ? -evalValue / 100 : evalValue / 100;
-            } else {
-              const mateInMoves = Math.abs(evalValue);
-              if (evalValue > 0) {
-                adjustedEval = sideToMove === "w" ? `M${mateInMoves}` : `M-${mateInMoves}`;
-              } else {
-                adjustedEval = sideToMove === "w" ? `M-${mateInMoves}` : `M${mateInMoves}`;
-              }
-            }
-            analysisLines[pvIndex] = {
-              evaluation: adjustedEval,
-              line: sanLine
-            };
-          }
-        }
-        const bestMoveMatch = message.match(/bestmove\s+(\S+)/);
-        if (bestMoveMatch) {
-          cleanup();
-          const finalLines = analysisLines.filter(Boolean);
+      const messageHandler = (e) => {
+        var _a2;
+        if (e.data.startsWith("bestmove")) {
+          clearTimeout(timeoutId);
+          (_a2 = this.stockfish) == null ? void 0 : _a2.removeEventListener("message", messageHandler);
+          const finalLines = [...this.analysisLines].filter(Boolean);
           this.lines = finalLines;
+          this.terminate();
           resolve(finalLines);
         }
-      });
-      try {
-        stockfish.postMessage("uci");
-        if (options.multiPV) {
-          stockfish.postMessage(
-            `setoption name MultiPV value ${options.multiPV}`
-          );
-        }
-        if (options.skillLevel) {
-          stockfish.postMessage(
-            `setoption name Skill Level value ${options.skillLevel}`
-          );
-        }
-        if (options.contempt) {
-          stockfish.postMessage(
-            `setoption name Contempt value ${options.contempt}`
-          );
-        }
-        if (options.threads) {
-          stockfish.postMessage(
-            `setoption name Threads value ${options.threads}`
-          );
-        }
-        if (options.hash) {
-          stockfish.postMessage(`setoption name Hash value ${options.hash}`);
-        }
-        stockfish.postMessage(`position fen ${this.fen()}`);
-        let goCommand = "go";
-        if (options.depth !== void 0) {
-          goCommand += ` depth ${options.depth}`;
-        } else if (options.time !== void 0) {
-          goCommand += ` wtime ${options.time} btime ${options.time}`;
-        } else if (options.movetime !== void 0) {
-          goCommand += ` movetime ${options.movetime}`;
-        } else if (options.nodes !== void 0) {
-          goCommand += ` nodes ${options.nodes}`;
+      };
+      (_a = this.stockfish) == null ? void 0 : _a.addEventListener("message", messageHandler);
+      const checkUciOk = () => {
+        if (this.isuciok) {
+          this._sendCommand(`position fen ${this.fen()}`);
+          let goCommand = "go";
+          if (options.depth !== void 0)
+            goCommand += ` depth ${options.depth}`;
+          else if (options.time !== void 0)
+            goCommand += ` wtime ${options.time} btime ${options.time}`;
+          else if (options.movetime !== void 0)
+            goCommand += ` movetime ${options.movetime}`;
+          else if (options.nodes !== void 0)
+            goCommand += ` nodes ${options.nodes}`;
+          else goCommand += " depth 15";
+          this._sendCommand(goCommand);
         } else {
-          goCommand += " depth 15";
+          setTimeout(checkUciOk, 50);
         }
-        stockfish.postMessage(goCommand);
-      } catch (error) {
-        cleanup();
-        reject(new Error(`Failed to send commands to Stockfish: ${error}`));
-      }
+      };
+      checkUciOk();
     });
   }
   convertMovesToSAN(moves, position) {

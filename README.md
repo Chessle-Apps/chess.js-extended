@@ -43,6 +43,72 @@ if (lines.length > 0) {
 }
 ```
 
+## Dual-Mode API: Promise and Streaming
+
+`ChessEngine` offers two distinct modes for analysis to suit different use cases: a simple **Promise-based** mode for one-shot evaluations and a powerful **Streaming API** for continuous analysis.
+
+**Important:** A single `ChessEngine` instance can only perform one analysis at a time. Attempting to start a new evaluation or analysis while one is already in progress will result in an error.
+
+### 1. Promise-Based Analysis (One-Shot)
+
+The `evaluatePosition()` method is perfect for when you need a single, final evaluation of the current board state. It returns a promise that resolves once Stockfish has completed its analysis.
+
+```typescript
+import { ChessEngine } from "@chessle/chess.js-extended";
+
+const engine = new ChessEngine();
+engine.load("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+
+async function getEvaluation() {
+  console.log("Evaluating position...");
+  const lines = await engine.evaluatePosition({ depth: 18 });
+  console.log("Evaluation complete.");
+
+  if (lines.length > 0) {
+    const bestLine = lines[0];
+    console.log(`Evaluation: ${bestLine.evaluation}`);
+    console.log(`Best move: ${bestLine.line[0]}`);
+  }
+}
+
+getEvaluation();
+```
+
+### 2. Streaming Analysis (Continuous)
+
+The streaming API is ideal for applications that need to display real-time engine analysis, such as a live chessboard UI.
+
+- `startAnalysis(options)`: Begins an infinite analysis of the current position.
+- `on('analysis', callback)`: Listens for analysis updates. The callback receives an array of the latest `AnalysisLine` objects as the engine deepens its search.
+- `stopAnalysis()`: Sends the `stop` command to Stockfish, which will then emit a final `bestmove` and terminate the analysis.
+
+```typescript
+import { ChessEngine } from "@chessle/chess.js-extended";
+
+const engine = new ChessEngine();
+engine.load("r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3");
+
+// 1. Listen for analysis updates
+engine.on("analysis", (lines) => {
+  console.clear();
+  console.log("Current Analysis:");
+  lines.forEach((line) => {
+    console.log(`- ${line.line.join(" ")} (Eval: ${line.evaluation})`);
+  });
+});
+
+// 2. Start the analysis
+console.log("Starting continuous analysis...");
+engine.startAnalysis({ multiPV: 3 });
+
+// 3. Stop the analysis after a few seconds
+setTimeout(() => {
+  console.log("Stopping analysis...");
+  engine.stopAnalysis();
+  console.log("Analysis stopped.");
+}, 5000);
+```
+
 ## API Reference
 
 ### ChessEngine Class
@@ -57,28 +123,48 @@ const engine = new ChessEngine();
 
 #### Properties
 
-- `lines: AnalysisLine[]` - An array of analysis lines, each containing an evaluation and a suggested sequence of moves.
+- `lines: AnalysisLine[]` - An array of the most recent final analysis lines from the last completed `evaluatePosition` call.
 
 #### Methods
 
 ##### evaluatePosition(options?)
 
-Evaluates the current position using Stockfish.
+Evaluates the current position using Stockfish and returns a single result.
 
 ```typescript
 await engine.evaluatePosition(options?: StockfishOptions): Promise<AnalysisLine[]>;
 ```
 
-**Parameters:**
+##### startAnalysis(options?)
 
-- `options` (optional): Configuration object for the evaluation.
-
-**Returns:**
-
-A promise that resolves to an array of `AnalysisLine` objects.
+Starts a continuous, infinite analysis of the current position. Use the `on('analysis', ...)` method to receive updates.
 
 ```typescript
-Promise<AnalysisLine[]>;
+engine.startAnalysis(options?: StockfishOptions): void;
+```
+
+##### stopAnalysis()
+
+Stops a running analysis that was started with `startAnalysis()`.
+
+```typescript
+engine.stopAnalysis(): void;
+```
+
+##### on(event, listener)
+
+Subscribes to engine events. Currently, only the `analysis` event is supported.
+
+```typescript
+engine.on('analysis', (lines: AnalysisLine[]) => void): void;
+```
+
+##### off(event, listener)
+
+Unsubscribes from engine events.
+
+```typescript
+engine.off('analysis', (lines: AnalysisLine[]) => void): void;
 ```
 
 ### StockfishOptions Interface
@@ -171,9 +257,9 @@ You can fine-tune the engine's performance and playing style by providing additi
 ```typescript
 const lines = await engine.evaluatePosition({
   skillLevel: 10, // Set skill level to 10 (0-20)
-  contempt: 20,   // Set contempt to 20 (-100-100)
-  threads: 4,     // Use 4 threads
-  hash: 128,      // Use 128MB of hash memory
+  contempt: 20, // Set contempt to 20 (-100-100)
+  threads: 4, // Use 4 threads
+  hash: 128, // Use 128MB of hash memory
 });
 
 if (lines.length > 0) {

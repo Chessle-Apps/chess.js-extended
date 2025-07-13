@@ -2,6 +2,32 @@ import { Chess } from "chess.js";
 import { getStockfishJs, getStockfishWasmJs } from "./stockfish-bundle";
 export * from "chess.js";
 
+// A simple EventEmitter class
+class EventEmitter<T> {
+  private listeners: { [event: string]: ((data: T) => void)[] } = {};
+
+  on(event: string, listener: (data: T) => void): void {
+    if (!this.listeners[event]) {
+      this.listeners[event] = [];
+    }
+    this.listeners[event].push(listener);
+  }
+
+  off(event: string, listener: (data: T) => void): void {
+    if (!this.listeners[event]) {
+      return;
+    }
+    this.listeners[event] = this.listeners[event].filter((l) => l !== listener);
+  }
+
+  emit(event: string, data: T): void {
+    if (!this.listeners[event]) {
+      return;
+    }
+    this.listeners[event].forEach((listener) => listener(data));
+  }
+}
+
 export interface StockfishOptions {
   /** Search depth (default: 15) */
   depth?: number;
@@ -31,200 +57,241 @@ export interface AnalysisLine {
   line: string[];
 }
 
+type EngineMode = "idle" | "evaluate" | "stream";
+
 export class ChessEngine extends Chess {
   public lines: AnalysisLine[];
+  private stockfish: Worker | null = null;
+  private emitter = new EventEmitter<AnalysisLine[]>();
+  private analysisLines: AnalysisLine[] = [];
+  private stockfishWorkerUrl: string | null = null;
+  private isuciok = false;
+  private mode: EngineMode = "idle";
 
   constructor() {
     super();
     this.lines = [];
   }
 
-  async evaluatePosition(
-    options: StockfishOptions = {},
-  ): Promise<AnalysisLine[]> {
-    // Check if we're in a browser environment
+  on(event: "analysis", listener: (data: AnalysisLine[]) => void): void {
+    this.emitter.on(event, listener);
+  }
+
+  off(event: "analysis", listener: (data: AnalysisLine[]) => void): void {
+    this.emitter.off(event, listener);
+  }
+
+  private _initializeWorker(options: StockfishOptions = {}): Worker {
+    if (this.stockfish) {
+      return this.stockfish;
+    }
+
     if (typeof window === "undefined" || typeof Worker === "undefined") {
       throw new Error(
         "ChessEngine requires a browser environment with Web Worker support",
       );
     }
 
-    return new Promise((resolve, reject) => {
-      let stockfishWorkerUrl: string;
-
-      // If a custom URL is provided, use it
-      if (options.stockfishUrl) {
-        stockfishWorkerUrl = options.stockfishUrl;
-      } else {
-        // Use bundled Stockfish files
-        const wasmSupported =
-          typeof WebAssembly === "object" &&
-          WebAssembly.validate(
-            Uint8Array.of(0x0, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00),
-          );
-
-        const stockfishCode = wasmSupported
-          ? getStockfishWasmJs()
-          : getStockfishJs();
-
-        // Create a blob URL from the bundled code
-        const blob = new Blob([stockfishCode], {
-          type: "application/javascript",
-        });
-        stockfishWorkerUrl = URL.createObjectURL(blob);
-      }
-
-      const stockfish = new Worker(stockfishWorkerUrl);
-
-      // Declare timeout variable
-      let timeoutId: ReturnType<typeof setTimeout>;
-
-      const cleanup = () => {
-        stockfish.terminate();
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        // Clean up blob URL if we created one
-        if (!options.stockfishUrl && stockfishWorkerUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(stockfishWorkerUrl);
-        }
-      };
-
-      // Add error handling for worker
-      stockfish.onerror = (error) => {
-        console.error("Stockfish worker error:", error);
-        cleanup();
-        reject(
-          new Error(
-            `Stockfish worker failed to load. ${
-              error.message || "Check browser console for details."
-            }`,
-          ),
+    if (options.stockfishUrl) {
+      this.stockfishWorkerUrl = options.stockfishUrl;
+    } else if (!this.stockfishWorkerUrl) {
+      const wasmSupported =
+        typeof WebAssembly === "object" &&
+        WebAssembly.validate(
+          Uint8Array.of(0x0, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00),
         );
-      };
+      const stockfishCode = wasmSupported
+        ? getStockfishWasmJs()
+        : getStockfishJs();
+      const blob = new Blob([stockfishCode], {
+        type: "application/javascript",
+      });
+      this.stockfishWorkerUrl = URL.createObjectURL(blob);
+    }
 
-      // Set a timeout to prevent hanging (default 30 seconds)
+    this.stockfish = new Worker(this.stockfishWorkerUrl);
+    this.isuciok = false;
+
+    this.stockfish.onerror = (error) => {
+      console.error("Stockfish worker error:", error);
+      this.terminate();
+    };
+
+    this.stockfish.addEventListener("message", (e) => {
+      this._handleStockfishMessage(e.data, options);
+    });
+
+    this._sendCommand("uci");
+    return this.stockfish;
+  }
+
+  private _handleStockfishMessage(message: string, options: StockfishOptions) {
+    if (message === "uciok") {
+      this.isuciok = true;
+      this._setOptions(options);
+      return;
+    }
+
+    if (message.startsWith("bestmove")) {
+      if (this.mode === "stream") {
+        this.terminate();
+      }
+      return;
+    }
+
+    const sideToMove = this.fen().split(" ")[1];
+    const multipvMatch = message.match(
+      /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/,
+    );
+
+    if (multipvMatch) {
+      const pvIndex = parseInt(multipvMatch[1], 10) - 1;
+      const evalType = multipvMatch[2];
+      const evalValue = parseInt(multipvMatch[3], 10);
+      const pvLine = multipvMatch[4].trim().split(/\s+/);
+
+      if (pvLine.length > 0) {
+        const sanLine = this.convertMovesToSAN(pvLine, this.fen());
+        let adjustedEval: number | string;
+
+        if (evalType === "cp") {
+          adjustedEval =
+            sideToMove === "b" ? -evalValue / 100 : evalValue / 100;
+        } else {
+          const mateInMoves = Math.abs(evalValue);
+          adjustedEval =
+            (evalValue > 0 && sideToMove === "w") ||
+            (evalValue < 0 && sideToMove === "b")
+              ? `M${mateInMoves}`
+              : `M-${mateInMoves}`;
+        }
+        this.analysisLines[pvIndex] = {
+          evaluation: adjustedEval,
+          line: sanLine,
+        };
+        this.emitter.emit("analysis", this.analysisLines.filter(Boolean));
+      }
+    }
+  }
+
+  private _sendCommand(command: string) {
+    if (this.stockfish) {
+      this.stockfish.postMessage(command);
+    }
+  }
+
+  private _setOptions(options: StockfishOptions) {
+    if (options.multiPV)
+      this._sendCommand(`setoption name MultiPV value ${options.multiPV}`);
+    if (options.skillLevel)
+      this._sendCommand(
+        `setoption name Skill Level value ${options.skillLevel}`,
+      );
+    if (options.contempt)
+      this._sendCommand(`setoption name Contempt value ${options.contempt}`);
+    if (options.threads)
+      this._sendCommand(`setoption name Threads value ${options.threads}`);
+    if (options.hash)
+      this._sendCommand(`setoption name Hash value ${options.hash}`);
+  }
+
+  startAnalysis(options: StockfishOptions = {}) {
+    if (this.mode !== "idle") {
+      console.warn("Engine is busy. Please stop the current analysis first.");
+      return;
+    }
+    this.mode = "stream";
+    this._initializeWorker(options);
+    this.analysisLines = [];
+
+    const checkUciOk = () => {
+      if (this.isuciok) {
+        this._sendCommand(`position fen ${this.fen()}`);
+        this._sendCommand("go infinite");
+      } else {
+        setTimeout(checkUciOk, 50);
+      }
+    };
+    checkUciOk();
+  }
+
+  stopAnalysis() {
+    if (this.mode === "stream") {
+      this._sendCommand("stop");
+    }
+  }
+
+  terminate() {
+    if (this.stockfish) {
+      this._sendCommand("quit");
+      this.stockfish.terminate();
+      this.stockfish = null;
+    }
+    if (
+      this.stockfishWorkerUrl &&
+      this.stockfishWorkerUrl.startsWith("blob:")
+    ) {
+      URL.revokeObjectURL(this.stockfishWorkerUrl);
+      this.stockfishWorkerUrl = null;
+    }
+    this.isuciok = false;
+    this.mode = "idle";
+  }
+
+  async evaluatePosition(
+    options: StockfishOptions = {},
+  ): Promise<AnalysisLine[]> {
+    return new Promise((resolve, reject) => {
+      if (this.mode !== "idle") {
+        return reject(
+          new Error("Engine is busy. Please stop the current analysis first."),
+        );
+      }
+      this.mode = "evaluate";
+      this._initializeWorker(options);
+      this.analysisLines = [];
+
       const timeoutMs = options.movetime || 30000;
-      timeoutId = setTimeout(() => {
+      const timeoutId = setTimeout(() => {
+        this.terminate();
         console.warn(
           `Stockfish evaluation timed out after ${timeoutMs}ms, returning empty analysis.`,
         );
-        cleanup();
-        this.lines = [];
         resolve([]);
       }, timeoutMs);
 
-      // Extract side to move from FEN
-      const sideToMove = this.fen().split(" ")[1];
-
-      // Keep track of the latest evaluation results for all lines
-      const analysisLines: AnalysisLine[] = [];
-
-      stockfish.addEventListener("message", (e) => {
-        const message = e.data;
-        // Parse multipv lines
-        const multipvMatch = message.match(
-          /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/,
-        );
-
-        if (multipvMatch) {
-          const pvIndex = parseInt(multipvMatch[1], 10) - 1;
-          const evalType = multipvMatch[2];
-          const evalValue = parseInt(multipvMatch[3], 10);
-          const pvLine = multipvMatch[4].trim().split(/\s+/);
-
-          if (pvLine.length > 0) {
-            const sanLine = this.convertMovesToSAN(pvLine, this.fen());
-
-            // Calculate evaluation
-            let adjustedEval: number | string;
-            if (evalType === "cp") {
-              adjustedEval =
-                sideToMove === "b" ? -evalValue / 100 : evalValue / 100;
-            } else {
-              // Handle mate scores with proper notation
-              const mateInMoves = Math.abs(evalValue);
-              if (evalValue > 0) {
-                // Mate for current side to move
-                adjustedEval =
-                  sideToMove === "w" ? `M${mateInMoves}` : `M-${mateInMoves}`;
-              } else {
-                // Mate against current side to move
-                adjustedEval =
-                  sideToMove === "w" ? `M-${mateInMoves}` : `M${mateInMoves}`;
-              }
-            }
-            // Store the result for this PV index
-            analysisLines[pvIndex] = {
-              evaluation: adjustedEval,
-              line: sanLine,
-            };
-          }
-        }
-
-        // Parse best move - this indicates Stockfish has finished analyzing
-        const bestMoveMatch = message.match(/bestmove\s+(\S+)/);
-        if (bestMoveMatch) {
-          cleanup();
-
-          // Filter out any empty slots in case of sparse multipv data
-          const finalLines = analysisLines.filter(Boolean);
+      const messageHandler = (e: MessageEvent) => {
+        if (e.data.startsWith("bestmove")) {
+          clearTimeout(timeoutId);
+          this.stockfish?.removeEventListener("message", messageHandler);
+          const finalLines = [...this.analysisLines].filter(Boolean);
           this.lines = finalLines;
+          this.terminate();
           resolve(finalLines);
         }
-      });
+      };
 
-      // Send commands to stockfish
-      try {
-        stockfish.postMessage("uci");
+      this.stockfish?.addEventListener("message", messageHandler);
 
-        // Set engine options
-        if (options.multiPV) {
-          stockfish.postMessage(
-            `setoption name MultiPV value ${options.multiPV}`,
-          );
-        }
-        if (options.skillLevel) {
-          stockfish.postMessage(
-            `setoption name Skill Level value ${options.skillLevel}`,
-          );
-        }
-        if (options.contempt) {
-          stockfish.postMessage(
-            `setoption name Contempt value ${options.contempt}`,
-          );
-        }
-        if (options.threads) {
-          stockfish.postMessage(
-            `setoption name Threads value ${options.threads}`,
-          );
-        }
-        if (options.hash) {
-          stockfish.postMessage(`setoption name Hash value ${options.hash}`);
-        }
-
-        stockfish.postMessage(`position fen ${this.fen()}`);
-
-        // Build the go command with options
-        let goCommand = "go";
-        if (options.depth !== undefined) {
-          goCommand += ` depth ${options.depth}`;
-        } else if (options.time !== undefined) {
-          goCommand += ` wtime ${options.time} btime ${options.time}`;
-        } else if (options.movetime !== undefined) {
-          goCommand += ` movetime ${options.movetime}`;
-        } else if (options.nodes !== undefined) {
-          goCommand += ` nodes ${options.nodes}`;
+      const checkUciOk = () => {
+        if (this.isuciok) {
+          this._sendCommand(`position fen ${this.fen()}`);
+          let goCommand = "go";
+          if (options.depth !== undefined)
+            goCommand += ` depth ${options.depth}`;
+          else if (options.time !== undefined)
+            goCommand += ` wtime ${options.time} btime ${options.time}`;
+          else if (options.movetime !== undefined)
+            goCommand += ` movetime ${options.movetime}`;
+          else if (options.nodes !== undefined)
+            goCommand += ` nodes ${options.nodes}`;
+          else goCommand += " depth 15";
+          this._sendCommand(goCommand);
         } else {
-          // Default to depth 15 if no options provided
-          goCommand += " depth 15";
+          setTimeout(checkUciOk, 50);
         }
-
-        stockfish.postMessage(goCommand);
-      } catch (error) {
-        cleanup();
-        reject(new Error(`Failed to send commands to Stockfish: ${error}`));
-      }
+      };
+      checkUciOk();
     });
   }
 
@@ -234,9 +301,7 @@ export class ChessEngine extends Chess {
 
     for (const move of moves) {
       try {
-        // Make the move and get its SAN notation
         const moveObj = chess.move(move);
-
         if (moveObj) {
           convertedMoves.push(moveObj.san);
         }
