@@ -3829,6 +3829,7 @@ var ChessEngine = class extends import_chess.Chess {
           convertedMoves.push(moveObj.san);
         }
       } catch (error) {
+        console.error("Error converting move:", error);
         break;
       }
     }

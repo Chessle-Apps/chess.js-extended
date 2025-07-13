@@ -306,6 +306,10 @@ export class ChessEngine extends Chess {
           convertedMoves.push(moveObj.san);
         }
       } catch (error) {
+        // This can happen if the move is invalid, which is expected
+        // when we are just converting a sequence of moves.
+        // We just break and return the moves we have converted so far.
+        console.error("Error converting move:", error);
         break;
       }
     }

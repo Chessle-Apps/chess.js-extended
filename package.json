@@ -13,9 +13,10 @@
   ],
   "scripts": {
     "prebuild": "node scripts/bundle-stockfish.mjs",
-    "build": "pnpm run clean && node build.mjs",
+    "build": "pnpm run lint && pnpm run clean && node build.mjs",
     "dev": "node build.mjs --watch",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "lint": "eslint . --ext .ts"
   },
   "keywords": [
     "chess",
@@ -37,8 +38,10 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@typescript-eslint/eslint-plugin": "^8.36.0",
     "@yarnpkg/esbuild-plugin-pnp": "3.0.0-rc.15",
     "esbuild": "^0.25.6",
+    "eslint": "^8.57.1",
     "tsx": "^4.19.3",
     "typescript": "5.7.3"
   }
