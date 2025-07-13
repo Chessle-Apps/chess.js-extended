@@ -3604,9 +3604,7 @@ __reExport(index_exports, __toESM(require_chess()));
 var ChessEngine = class extends import_chess.Chess {
   constructor() {
     super();
-    this.evaluation = 0;
-    this.bestMove = void 0;
-    this.suggestedLine = [];
+    this.lines = [];
   }
   async evaluatePosition(options = {}) {
     if (typeof window === "undefined" || typeof Worker === "undefined") {
@@ -3651,38 +3649,26 @@ var ChessEngine = class extends import_chess.Chess {
       const timeoutMs = options.movetime || 3e4;
       timeoutId = setTimeout(() => {
         console.warn(
-          `Stockfish evaluation timed out after ${timeoutMs}ms, returning default evaluation`
+          `Stockfish evaluation timed out after ${timeoutMs}ms, returning empty analysis.`
         );
         cleanup();
-        const defaultResult = {
-          evaluation: 0,
-          bestMove: void 0,
-          suggestedLine: []
-        };
-        this.suggestedLine = defaultResult.suggestedLine;
-        this.evaluation = defaultResult.evaluation;
-        this.bestMove = defaultResult.bestMove;
-        resolve(defaultResult);
+        this.lines = [];
+        resolve([]);
       }, timeoutMs);
       const sideToMove = this.fen().split(" ")[1];
-      let result = {
-        evaluation: 0,
-        bestMove: void 0,
-        suggestedLine: []
-      };
-      let latestLine = [];
+      const analysisLines = [];
       stockfish.addEventListener("message", (e) => {
-        var _a;
         const message = e.data;
         const multipvMatch = message.match(
-          /multipv\s+1.*score (cp|mate) (-?\d+).*pv\s+(.+)/
+          /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/
         );
         if (multipvMatch) {
-          const evalType = multipvMatch[1];
-          const evalValue = parseInt(multipvMatch[2], 10);
-          const pvLine = multipvMatch[3].trim().split(/\s+/);
+          const pvIndex = parseInt(multipvMatch[1], 10) - 1;
+          const evalType = multipvMatch[2];
+          const evalValue = parseInt(multipvMatch[3], 10);
+          const pvLine = multipvMatch[4].trim().split(/\s+/);
           if (pvLine.length > 0) {
-            latestLine = this.convertMovesToSAN(pvLine, this.fen());
+            const sanLine = this.convertMovesToSAN(pvLine, this.fen());
             let adjustedEval;
             if (evalType === "cp") {
               adjustedEval = sideToMove === "b" ? -evalValue / 100 : evalValue / 100;
@@ -3694,25 +3680,24 @@ var ChessEngine = class extends import_chess.Chess {
                 adjustedEval = sideToMove === "w" ? `M-${mateInMoves}` : `M${mateInMoves}`;
               }
             }
-            result.evaluation = adjustedEval;
+            analysisLines[pvIndex] = {
+              evaluation: adjustedEval,
+              line: sanLine
+            };
           }
         }
-        const bestMove = (_a = message.match(/bestmove\s+(\S+)/)) == null ? void 0 : _a[1];
-        if (bestMove) {
-          result.bestMove = bestMove;
-          if (latestLine.length > 0) {
-            result.suggestedLine = latestLine;
-          }
+        const bestMoveMatch = message.match(/bestmove\s+(\S+)/);
+        if (bestMoveMatch) {
           cleanup();
-          this.suggestedLine = result.suggestedLine;
-          this.evaluation = result.evaluation;
-          this.bestMove = result.bestMove;
-          resolve(result);
+          const finalLines = analysisLines.filter(Boolean);
+          this.lines = finalLines;
+          resolve(finalLines);
         }
       });
       try {
         stockfish.postMessage("uci");
-        stockfish.postMessage("setoption name MultiPV value 1");
+        const multiPV = options.multiPV || 1;
+        stockfish.postMessage(`setoption name MultiPV value ${multiPV}`);
         stockfish.postMessage(`position fen ${this.fen()}`);
         let goCommand = "go";
         if (options.depth !== void 0) {

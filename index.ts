@@ -13,29 +13,31 @@ export interface StockfishOptions {
   nodes?: number;
   /** Custom Stockfish worker URL (optional) */
   stockfishUrl?: string;
+  /** Number of principal variations to search for (default: 1) */
+  multiPV?: number;
+}
+
+// Define the structure for a single analysis line
+export interface AnalysisLine {
+  evaluation: number | string;
+  line: string[];
 }
 
 export class ChessEngine extends Chess {
-  public evaluation: number | string;
-  public bestMove: undefined | string;
-  public suggestedLine: string[];
+  public lines: AnalysisLine[];
 
   constructor() {
     super();
-    this.evaluation = 0;
-    this.bestMove = undefined;
-    this.suggestedLine = [];
+    this.lines = [];
   }
 
-  async evaluatePosition(options: StockfishOptions = {}): Promise<{
-    evaluation: number | string;
-    bestMove: string | undefined;
-    suggestedLine: string[];
-  }> {
+  async evaluatePosition(
+    options: StockfishOptions = {},
+  ): Promise<AnalysisLine[]> {
     // Check if we're in a browser environment
     if (typeof window === "undefined" || typeof Worker === "undefined") {
       throw new Error(
-        "ChessEngine requires a browser environment with Web Worker support"
+        "ChessEngine requires a browser environment with Web Worker support",
       );
     }
 
@@ -50,7 +52,7 @@ export class ChessEngine extends Chess {
         const wasmSupported =
           typeof WebAssembly === "object" &&
           WebAssembly.validate(
-            Uint8Array.of(0x0, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00)
+            Uint8Array.of(0x0, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00),
           );
 
         const stockfishCode = wasmSupported
@@ -86,8 +88,10 @@ export class ChessEngine extends Chess {
         cleanup();
         reject(
           new Error(
-            `Stockfish worker failed to load. ${error.message || "Check browser console for details."}`
-          )
+            `Stockfish worker failed to load. ${
+              error.message || "Check browser console for details."
+            }`,
+          ),
         );
       };
 
@@ -95,48 +99,34 @@ export class ChessEngine extends Chess {
       const timeoutMs = options.movetime || 30000;
       timeoutId = setTimeout(() => {
         console.warn(
-          `Stockfish evaluation timed out after ${timeoutMs}ms, returning default evaluation`
+          `Stockfish evaluation timed out after ${timeoutMs}ms, returning empty analysis.`,
         );
         cleanup();
-        // Return default evaluation instead of throwing an error
-        const defaultResult = {
-          evaluation: 0,
-          bestMove: undefined,
-          suggestedLine: [],
-        };
-        this.suggestedLine = defaultResult.suggestedLine;
-        this.evaluation = defaultResult.evaluation;
-        this.bestMove = defaultResult.bestMove;
-        resolve(defaultResult);
+        this.lines = [];
+        resolve([]);
       }, timeoutMs);
 
       // Extract side to move from FEN
       const sideToMove = this.fen().split(" ")[1];
 
-      // Keep track of the latest evaluation results
-      let result = {
-        evaluation: 0 as number | string,
-        bestMove: undefined as string | undefined,
-        suggestedLine: [] as string[],
-      };
-
-      // Keep track of the latest line while analyzing
-      let latestLine: string[] = [];
+      // Keep track of the latest evaluation results for all lines
+      const analysisLines: AnalysisLine[] = [];
 
       stockfish.addEventListener("message", (e) => {
         const message = e.data;
         // Parse multipv lines
         const multipvMatch = message.match(
-          /multipv\s+1.*score (cp|mate) (-?\d+).*pv\s+(.+)/
+          /multipv\s+(\d+).*score (cp|mate) (-?\d+).*pv\s+(.+)/,
         );
+
         if (multipvMatch) {
-          const evalType = multipvMatch[1];
-          const evalValue = parseInt(multipvMatch[2], 10);
-          const pvLine = multipvMatch[3].trim().split(/\s+/);
+          const pvIndex = parseInt(multipvMatch[1], 10) - 1;
+          const evalType = multipvMatch[2];
+          const evalValue = parseInt(multipvMatch[3], 10);
+          const pvLine = multipvMatch[4].trim().split(/\s+/);
 
           if (pvLine.length > 0) {
-            // Just update the latest line, but don't set it as the final line yet
-            latestLine = this.convertMovesToSAN(pvLine, this.fen());
+            const sanLine = this.convertMovesToSAN(pvLine, this.fen());
 
             // Calculate evaluation
             let adjustedEval: number | string;
@@ -156,30 +146,32 @@ export class ChessEngine extends Chess {
                   sideToMove === "w" ? `M-${mateInMoves}` : `M${mateInMoves}`;
               }
             }
-            result.evaluation = adjustedEval;
+            // Store the result for this PV index
+            analysisLines[pvIndex] = {
+              evaluation: adjustedEval,
+              line: sanLine,
+            };
           }
         }
 
         // Parse best move - this indicates Stockfish has finished analyzing
-        const bestMove = message.match(/bestmove\s+(\S+)/)?.[1];
-        if (bestMove) {
-          result.bestMove = bestMove;
-          // Now that Stockfish is done, set the final line
-          if (latestLine.length > 0) {
-            result.suggestedLine = latestLine;
-          }
+        const bestMoveMatch = message.match(/bestmove\s+(\S+)/);
+        if (bestMoveMatch) {
           cleanup();
-          this.suggestedLine = result.suggestedLine;
-          this.evaluation = result.evaluation;
-          this.bestMove = result.bestMove;
-          resolve(result);
+
+          // Filter out any empty slots in case of sparse multipv data
+          const finalLines = analysisLines.filter(Boolean);
+          this.lines = finalLines;
+          resolve(finalLines);
         }
       });
 
       // Send commands to stockfish
       try {
         stockfish.postMessage("uci");
-        stockfish.postMessage("setoption name MultiPV value 1");
+        // Set MultiPV option if provided
+        const multiPV = options.multiPV || 1;
+        stockfish.postMessage(`setoption name MultiPV value ${multiPV}`);
         stockfish.postMessage(`position fen ${this.fen()}`);
 
         // Build the go command with options

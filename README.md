@@ -9,8 +9,8 @@ A powerful browser-only chess engine package that extends chess.js with built-in
 - 🌐 **Browser-Only**: Designed specifically for browser environments with Web Worker support
 - ⚡ **WebAssembly Support**: Automatically uses WASM when available for better performance
 - 🎯 **Position Evaluation**: Get numerical evaluations and mate scores
-- 📈 **Best Move Suggestions**: Find the best move for any position
-- 🔍 **Principal Variation**: Get the suggested line of play
+- 📈 **Multi-PV Analysis**: Get multiple principal variations for deeper insight
+- 🔍 **Suggested Lines**: Get full suggested lines of play in SAN format
 - ⚙️ **Flexible Options**: Configure search depth, time limits, and more
 - 📦 **Multiple Formats**: CommonJS and ES Module builds included
 
@@ -33,10 +33,14 @@ engine.move("e5");
 engine.move("Nf3");
 
 // Evaluate the position
-const result = await engine.evaluatePosition();
-console.log(`Evaluation: ${result.evaluation}`);
-console.log(`Best move: ${result.bestMove}`);
-console.log(`Suggested line: ${result.suggestedLine.join(" ")}`);
+const lines = await engine.evaluatePosition();
+
+if (lines.length > 0) {
+  const bestLine = lines[0];
+  console.log(`Evaluation: ${bestLine.evaluation}`);
+  console.log(`Best move: ${bestLine.line[0]}`);
+  console.log(`Suggested line: ${bestLine.line.join(" ")}`);
+}
 ```
 
 ## API Reference
@@ -53,9 +57,7 @@ const engine = new ChessEngine();
 
 #### Properties
 
-- `evaluation: number | string` - Current position evaluation
-- `bestMove: string | undefined` - Best move in UCI notation
-- `suggestedLine: string[]` - Principal variation in SAN notation
+- `lines: AnalysisLine[]` - An array of analysis lines, each containing an evaluation and a suggested sequence of moves.
 
 #### Methods
 
@@ -64,21 +66,19 @@ const engine = new ChessEngine();
 Evaluates the current position using Stockfish.
 
 ```typescript
-await engine.evaluatePosition(options?: StockfishOptions)
+await engine.evaluatePosition(options?: StockfishOptions): Promise<AnalysisLine[]>;
 ```
 
 **Parameters:**
 
-- `options` (optional): Configuration object for the evaluation
+- `options` (optional): Configuration object for the evaluation.
 
 **Returns:**
 
+A promise that resolves to an array of `AnalysisLine` objects.
+
 ```typescript
-Promise<{
-  evaluation: number | string;
-  bestMove: string | undefined;
-  suggestedLine: string[];
-}>;
+Promise<AnalysisLine[]>;
 ```
 
 ### StockfishOptions Interface
@@ -93,8 +93,21 @@ interface StockfishOptions {
   movetime?: number;
   /** Number of nodes to search */
   nodes?: number;
+  /** Number of principal variations to search for (default: 1) */
+  multiPV?: number;
   /** Custom Stockfish worker URL (optional) */
   stockfishUrl?: string;
+}
+```
+
+### AnalysisLine Interface
+
+```typescript
+interface AnalysisLine {
+  /** The evaluation of the position (e.g., 0.5, -1.2, "M5", "M-3") */
+  evaluation: number | string;
+  /** The suggested sequence of moves in SAN format */
+  line: string[];
 }
 ```
 
@@ -108,38 +121,54 @@ import { ChessEngine } from "chess.js-extended";
 const engine = new ChessEngine();
 engine.load("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
 
-const result = await engine.evaluatePosition();
-console.log(`Position evaluation: ${result.evaluation}`);
-// Output: Position evaluation: 0.15
+const lines = await engine.evaluatePosition();
+if (lines.length > 0) {
+  console.log(`Position evaluation: ${lines[0].evaluation}`);
+  // Output: Position evaluation: 0.15
+}
 ```
 
-### Custom Search Depth
+### Multi-PV Analysis
+
+Get the top 3 best moves and their evaluations.
 
 ```typescript
-const result = await engine.evaluatePosition({ depth: 20 });
-console.log(`Deep evaluation: ${result.evaluation}`);
+const lines = await engine.evaluatePosition({ multiPV: 3 });
+
+lines.forEach((line, index) => {
+  console.log(
+    `Rank ${index + 1}: ${line.line.join(" ")} (Eval: ${line.evaluation})`,
+  );
+});
+// Output:
+// Rank 1: Nc6 ... (Eval: 0.15)
+// Rank 2: c5 ... (Eval: 0.20)
+// Rank 3: e6 ... (Eval: 0.22)
 ```
 
 ### Time-Limited Analysis
 
 ```typescript
 // Analyze for exactly 5 seconds
-const result = await engine.evaluatePosition({ movetime: 5000 });
-console.log(`Timed evaluation: ${result.evaluation}`);
+const lines = await engine.evaluatePosition({ movetime: 5000 });
+if (lines.length > 0) {
+  console.log(`Timed evaluation: ${lines[0].evaluation}`);
+}
 ```
 
 ### Getting the Best Move and Line
 
 ```typescript
-const result = await engine.evaluatePosition();
+const lines = await engine.evaluatePosition();
 
-if (result.bestMove) {
-  console.log(`Best move: ${result.bestMove}`);
-  engine.move(result.bestMove);
+if (lines.length > 0) {
+  const bestLine = lines[0];
+  console.log(`Best move: ${bestLine.line[0]}`);
+  engine.move(bestLine.line[0]);
+
+  console.log(`Principal variation: ${bestLine.line.join(" ")}`);
+  // Output: Principal variation: Nf3 Nc6 Bc4 Bc5
 }
-
-console.log(`Principal variation: ${result.suggestedLine.join(" ")}`);
-// Output: Principal variation: Nf3 Nc6 Bc4 Bc5
 ```
 
 ### Handling Mate Scores
@@ -148,9 +177,11 @@ console.log(`Principal variation: ${result.suggestedLine.join(" ")}`);
 // Load a position with checkmate
 engine.load("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
 
-const result = await engine.evaluatePosition();
-console.log(`Evaluation: ${result.evaluation}`);
-// Output: Evaluation: M-1 (mate in 1 for black)
+const lines = await engine.evaluatePosition();
+if (lines.length > 0) {
+  console.log(`Evaluation: ${lines[0].evaluation}`);
+  // Output: Evaluation: M-1 (mate in 1 for black)
+}
 ```
 
 ### Using All chess.js Methods
@@ -177,7 +208,7 @@ engine.undo();
 console.log(engine.fen());
 
 // And then evaluate
-const evaluation = await engine.evaluatePosition();
+const lines = await engine.evaluatePosition();
 ```
 
 ## Browser Compatibility
@@ -199,8 +230,10 @@ This package requires:
 
 ```typescript
 try {
-  const result = await engine.evaluatePosition();
-  console.log(result.evaluation);
+  const lines = await engine.evaluatePosition();
+  if (lines.length > 0) {
+    console.log(lines[0].evaluation);
+  }
 } catch (error) {
   if (error.message.includes("browser environment")) {
     console.log("This package only works in browsers");
