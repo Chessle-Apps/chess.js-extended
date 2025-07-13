@@ -15,6 +15,14 @@ export interface StockfishOptions {
   stockfishUrl?: string;
   /** Number of principal variations to search for (default: 1) */
   multiPV?: number;
+  /** Skill level of the engine (0-20) */
+  skillLevel?: number;
+  /** Contempt factor for the engine (-100 to 100) */
+  contempt?: number;
+  /** Number of CPU threads to use */
+  threads?: number;
+  /** Hash table size in MB */
+  hash?: number;
 }
 
 // Define the structure for a single analysis line
@@ -169,9 +177,32 @@ export class ChessEngine extends Chess {
       // Send commands to stockfish
       try {
         stockfish.postMessage("uci");
-        // Set MultiPV option if provided
-        const multiPV = options.multiPV || 1;
-        stockfish.postMessage(`setoption name MultiPV value ${multiPV}`);
+
+        // Set engine options
+        if (options.multiPV) {
+          stockfish.postMessage(
+            `setoption name MultiPV value ${options.multiPV}`,
+          );
+        }
+        if (options.skillLevel) {
+          stockfish.postMessage(
+            `setoption name Skill Level value ${options.skillLevel}`,
+          );
+        }
+        if (options.contempt) {
+          stockfish.postMessage(
+            `setoption name Contempt value ${options.contempt}`,
+          );
+        }
+        if (options.threads) {
+          stockfish.postMessage(
+            `setoption name Threads value ${options.threads}`,
+          );
+        }
+        if (options.hash) {
+          stockfish.postMessage(`setoption name Hash value ${options.hash}`);
+        }
+
         stockfish.postMessage(`position fen ${this.fen()}`);
 
         // Build the go command with options

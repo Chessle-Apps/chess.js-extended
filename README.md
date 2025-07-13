@@ -95,6 +95,14 @@ interface StockfishOptions {
   nodes?: number;
   /** Number of principal variations to search for (default: 1) */
   multiPV?: number;
+  /** Skill level of the engine (0-20) */
+  skillLevel?: number;
+  /** Contempt value for the engine (-100 to 100) */
+  contempt?: number;
+  /** Number of threads to use (1-512) */
+  threads?: number;
+  /** Hash table size in MB (1-32768) */
+  hash?: number;
   /** Custom Stockfish worker URL (optional) */
   stockfishUrl?: string;
 }
@@ -153,6 +161,23 @@ lines.forEach((line, index) => {
 const lines = await engine.evaluatePosition({ movetime: 5000 });
 if (lines.length > 0) {
   console.log(`Timed evaluation: ${lines[0].evaluation}`);
+}
+```
+
+### Configuring Engine Parameters
+
+You can fine-tune the engine's performance and playing style by providing additional options.
+
+```typescript
+const lines = await engine.evaluatePosition({
+  skillLevel: 10, // Set skill level to 10 (0-20)
+  contempt: 20,   // Set contempt to 20 (-100-100)
+  threads: 4,     // Use 4 threads
+  hash: 128,      // Use 128MB of hash memory
+});
+
+if (lines.length > 0) {
+  console.log(`Evaluation with custom parameters: ${lines[0].evaluation}`);
 }
 ```
 

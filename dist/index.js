@@ -3696,8 +3696,29 @@ var ChessEngine = class extends import_chess.Chess {
       });
       try {
         stockfish.postMessage("uci");
-        const multiPV = options.multiPV || 1;
-        stockfish.postMessage(`setoption name MultiPV value ${multiPV}`);
+        if (options.multiPV) {
+          stockfish.postMessage(
+            `setoption name MultiPV value ${options.multiPV}`
+          );
+        }
+        if (options.skillLevel) {
+          stockfish.postMessage(
+            `setoption name Skill Level value ${options.skillLevel}`
+          );
+        }
+        if (options.contempt) {
+          stockfish.postMessage(
+            `setoption name Contempt value ${options.contempt}`
+          );
+        }
+        if (options.threads) {
+          stockfish.postMessage(
+            `setoption name Threads value ${options.threads}`
+          );
+        }
+        if (options.hash) {
+          stockfish.postMessage(`setoption name Hash value ${options.hash}`);
+        }
         stockfish.postMessage(`position fen ${this.fen()}`);
         let goCommand = "go";
         if (options.depth !== void 0) {
